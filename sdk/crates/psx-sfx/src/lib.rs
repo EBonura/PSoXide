@@ -66,6 +66,27 @@ pub mod vloop;
 use psx_asset::Audio;
 use psx_spu::{Adsr, Pitch, Spu, SpuAddr, TransferTimeout, Voice, Volume};
 
+/// One CD sector's user data in 32-bit words, the unit
+/// [`Bank::upload_streamed_on`] reads in.
+pub const SECTOR_WORDS: usize = 512;
+
+/// Why [`Bank::upload_streamed_on`] stopped.
+#[derive(Clone, Copy, Debug)]
+pub enum StreamUploadError {
+    /// The caller's sector read failed.
+    Read,
+    /// The header is not a valid `.psau` of the given length.
+    Parse(psx_asset::ParseError),
+    /// An SPU DMA piece did not finish.
+    Transfer(TransferTimeout),
+}
+
+/// A sector buffer as its bytes (little-endian words are the disc's byte order).
+fn sector_bytes(sector: &[u32; SECTOR_WORDS]) -> &[u8] {
+    // SAFETY: a [u32; N] viewed as its own bytes; alignment only shrinks.
+    unsafe { core::slice::from_raw_parts(sector.as_ptr().cast::<u8>(), SECTOR_WORDS * 4) }
+}
+
 /// [`include_psau!`]'s storage type, re-exported so a program needs no `psx-spu` dependency of its
 /// own to expand the macro.
 #[doc(hidden)]
@@ -300,6 +321,78 @@ impl Bank {
         // repeat address to the block itself as it decodes it, rather than
         // relying on a value written before key-on.
         put(tail, parking_tail())?;
+        self.next = SpuAddr::new(tail.byte_offset() + BLOCK_BYTES);
+        Ok(sample)
+    }
+
+    /// Upload a cooked `.psau` that is still on the disc, `total_len` bytes,
+    /// one 2 KB sector at a time through `sector`, so the sample never sits
+    /// whole in main RAM. `read` fills `sector` with the blob's next sector
+    /// (the first call its first); the caller starts the read at the blob's
+    /// LBA beforehand and stops it after. The parking block follows, as for
+    /// [`upload_on`](Self::upload_on).
+    ///
+    /// Main-RAM cost of loading a bank this way is the one sector buffer
+    /// instead of the bank's size.
+    ///
+    /// # Errors
+    /// [`StreamUploadError::Read`] when `read` fails, [`StreamUploadError::Parse`]
+    /// when the header is not a valid sample of `total_len` bytes, and
+    /// [`StreamUploadError::Transfer`] when an SPU DMA piece timed out. The bank
+    /// does not advance on any error.
+    pub fn upload_streamed_on(
+        &mut self,
+        spu: &mut Spu,
+        total_len: usize,
+        sector: &mut [u32; SECTOR_WORDS],
+        read: impl FnMut(&mut [u32; SECTOR_WORDS]) -> bool,
+    ) -> Result<Sample, StreamUploadError> {
+        self.upload_streamed_with(total_len, sector, read, |dest, bytes| {
+            spu.upload_adpcm(dest, bytes)
+        })
+    }
+
+    fn upload_streamed_with(
+        &mut self,
+        total_len: usize,
+        sector: &mut [u32; SECTOR_WORDS],
+        mut read: impl FnMut(&mut [u32; SECTOR_WORDS]) -> bool,
+        mut put: impl FnMut(SpuAddr, &[u8]) -> Result<(), TransferTimeout>,
+    ) -> Result<Sample, StreamUploadError> {
+        const SECTOR_BYTES: usize = SECTOR_WORDS * 4;
+        if !read(sector) {
+            return Err(StreamUploadError::Read);
+        }
+        let first = sector_bytes(sector);
+        let layout = Audio::layout(&first[..total_len.min(SECTOR_BYTES)], total_len)
+            .map_err(StreamUploadError::Parse)?;
+        let base = self.next.byte_offset();
+        let mut at = 0usize; // file offset of `sector`'s first byte
+        loop {
+            let from = layout.adpcm_start.max(at);
+            let to = layout.adpcm_end.min(at + SECTOR_BYTES);
+            if from < to {
+                let dest = SpuAddr::new(base + (from - layout.adpcm_start) as u32);
+                put(dest, &sector_bytes(sector)[from - at..to - at])
+                    .map_err(StreamUploadError::Transfer)?;
+            }
+            at += SECTOR_BYTES;
+            if at >= layout.adpcm_end {
+                break;
+            }
+            if !read(sector) {
+                return Err(StreamUploadError::Read);
+            }
+        }
+        let adpcm_len = (layout.adpcm_end - layout.adpcm_start) as u32;
+        let tail = SpuAddr::new(base + adpcm_len);
+        // The same self-looping parking block as `upload_with` (see there).
+        put(tail, parking_tail()).map_err(StreamUploadError::Transfer)?;
+        let sample = Sample {
+            addr: self.next,
+            rate_hz: layout.sample_rate_hz,
+            frames: adpcm_len / BLOCK_BYTES,
+        };
         self.next = SpuAddr::new(tail.byte_offset() + BLOCK_BYTES);
         Ok(sample)
     }
@@ -576,6 +669,67 @@ impl<const N: usize> Player<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_streamed_upload_lands_the_same_bytes_as_the_whole_blob() {
+        use std::vec::Vec;
+        for name in ["footstep", "explosion_short", "hit_metal"] {
+            let path = std::format!(
+                "{}/../../../assets/audio/freesfx/psau/{name}.psau",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let psau = std::fs::read(&path).expect("psau");
+            // The whole blob: a 64 KB SPU RAM image written by the classic upload.
+            let mut whole = std::vec![0u8; 0x8_0000];
+            let mut put_whole = |d: SpuAddr, b: &[u8]| {
+                let at = d.byte_offset() as usize;
+                whole[at..at + b.len()].copy_from_slice(b);
+                Ok(())
+            };
+            let mut bank = Bank::new(SpuAddr::new(0x1010));
+            let want = bank.upload_with(&psau, &mut put_whole).expect("upload");
+            // Streamed: sectors handed over one at a time, never the whole blob.
+            let mut streamed = std::vec![0u8; 0x8_0000];
+            let mut pieces = 0;
+            let mut put_streamed = |d: SpuAddr, b: &[u8]| {
+                let at = d.byte_offset() as usize;
+                assert_eq!(at % 8, 0, "SPU addresses are 8-byte aligned");
+                streamed[at..at + b.len()].copy_from_slice(b);
+                pieces += 1;
+                Ok(())
+            };
+            let mut next = 0usize;
+            let read = |s: &mut [u32; SECTOR_WORDS]| {
+                let chunk: Vec<u8> = (0..SECTOR_WORDS * 4)
+                    .map(|i| psau.get(next + i).copied().unwrap_or(0))
+                    .collect();
+                for (w, c) in s.iter_mut().zip(chunk.chunks(4)) {
+                    *w = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                }
+                next += SECTOR_WORDS * 4;
+                true
+            };
+            let mut sector = [0u32; SECTOR_WORDS];
+            let mut bank2 = Bank::new(SpuAddr::new(0x1010));
+            let got = bank2
+                .upload_streamed_with(psau.len(), &mut sector, read, &mut put_streamed)
+                .expect("streamed");
+            assert_eq!(
+                (got.addr(), got.sample_rate_hz(), got.len_samples()),
+                (want.addr(), want.sample_rate_hz(), want.len_samples()),
+                "{name}"
+            );
+            assert_eq!(bank2.next_addr(), bank.next_addr(), "{name}");
+            assert!(whole == streamed, "{name}: SPU RAM differs");
+            assert_eq!(pieces, psau.len().div_ceil(SECTOR_WORDS * 4) + 1, "{name}");
+            std::println!(
+                "{name}: {} B blob, main RAM {} B whole vs {} B streamed",
+                psau.len(),
+                psau.len(),
+                SECTOR_WORDS * 4
+            );
+        }
+    }
 
     #[test]
     fn a_level_bank_reuses_the_same_spu_ram_above_the_permanent_one() {
