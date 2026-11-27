@@ -29,9 +29,9 @@ use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_pack::cd::{
-    find_entry, find_indexed, load_chunk, load_chunk_decompressed, load_indexed,
-    load_indexed_decompressed, read_index, IndexEntry, SectorReader, SECTOR_WORDS,
-    WORLD_PACK_DEFAULT_LBA,
+    find_entry, find_entry_bounced, find_indexed, load_chunk, load_chunk_bounced,
+    load_chunk_decompressed, load_indexed, load_indexed_decompressed, read_index, Bounce,
+    IndexEntry, SectorReader, SECTOR_WORDS, WORLD_PACK_DEFAULT_LBA,
 };
 use psx_pack::fnv1a32;
 use psx_rt::tty;
@@ -75,10 +75,12 @@ const DST_WORDS: usize = 3072; // 12 KiB
 static mut DST: [u32; DST_WORDS] = [0; DST_WORDS];
 /// The whole fixture table as a resident index: 86 entries x 12 bytes.
 static mut INDEX: [IndexEntry; 86] = [IndexEntry::EMPTY; 86];
+/// A bounce sector that remembers which sector it holds.
+static mut BOUNCE: Bounce = Bounce::new();
 
 /// Up to this many result lines are recorded, then rendered every frame.
 struct Report {
-    lines: [Line; 16],
+    lines: [Line; 17],
     len: usize,
     all_ok: bool,
     failed: &'static str,
@@ -93,7 +95,7 @@ struct Line {
 impl Report {
     fn new() -> Self {
         Report {
-            lines: [Line { text: "", ok: true }; 16],
+            lines: [Line { text: "", ok: true }; 17],
             len: 0,
             all_ok: true,
             failed: "",
@@ -232,6 +234,22 @@ fn run(rd: &mut SectorReader) -> Report {
     if !rep.check(
         "LOAD-I 85",
         raw == Some(COMP_LEN) && bytes_match(&dst_bytes(dst)[..COMP_LEN], comp_byte),
+    ) {
+        return rep;
+    }
+
+    // A lookup, then the load of the same chunk, through a bounce buffer that
+    // remembers its sector: the load reads no table sector again.
+    // SAFETY: main runs once; the static is only touched here.
+    let bounce = unsafe { &mut *addr_of_mut!(BOUNCE) };
+    let found = find_entry_bounced(rd, WORLD_PACK_DEFAULT_LBA, RAW_ID, bounce);
+    dst.fill(0);
+    let loaded = load_chunk_bounced(rd, WORLD_PACK_DEFAULT_LBA, RAW_ID, bounce, dst);
+    if !rep.check(
+        "LOAD-B 84",
+        found == Some(e84)
+            && loaded == Some(RAW_LEN)
+            && bytes_match(&dst_bytes(dst)[..RAW_LEN], raw_byte),
     ) {
         return rep;
     }
