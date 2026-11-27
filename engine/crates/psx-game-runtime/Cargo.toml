@@ -44,6 +44,7 @@ psx-io        = { path = "../../../sdk/crates/psx-io" }
 psx-math      = { path = "../../../sdk/crates/psx-math" }
 psx-pack      = { path = "../../../sdk/crates/psx-pack" }
 psx-residency = { path = "../../../sdk/crates/psx-residency" }
+psx-rt        = { path = "../../../sdk/crates/psx-rt" }
 psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
 psx-vram      = { path = "../../../sdk/crates/psx-vram" }
 

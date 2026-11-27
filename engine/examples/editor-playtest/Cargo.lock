@@ -112,6 +112,7 @@ dependencies = [
  "psx-math",
  "psx-pack",
  "psx-residency",
+ "psx-rt",
  "psx-telemetry",
  "psx-vram",
 ]

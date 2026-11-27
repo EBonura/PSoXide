@@ -12,8 +12,8 @@
 //!
 //! A game installs it as its `#[global_allocator]` (leaving `psx-rt`'s `alloc` feature
 //! off) and calls [`ReuseHeap::init`] with `__heap_start..__heap_end` first thing in
-//! `main`. It is meant to move to the SDK next to `psx_rt::heap`, whose own doc comment
-//! asks for a real allocator "when the engine needs deallocation".
+//! `main`. It sits next to [`crate::heap`] (moved here from psx-game-runtime, 2026-11-27); a
+//! program that never names it links none of it.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
@@ -265,6 +265,8 @@ mod tests {
         let (heap, memory) = heap(8192);
         let start = memory.as_ptr() as usize;
         // The growth chain of a Vec<u32>: 16, 32, 64, 128 bytes, each step freeing the last.
+        // SAFETY: every block passed back is this heap's own, live, with the layout it was
+        // taken with.
         let grow = || unsafe {
             let mut block = heap.alloc(layout(16));
             let mut size = 16;

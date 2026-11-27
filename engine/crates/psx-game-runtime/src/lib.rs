@@ -51,7 +51,8 @@ pub mod poi;
 pub mod poise;
 pub mod projectiles;
 pub mod ranged_tactics;
-pub mod reuse_heap;
+/// Moved to the SDK (`psx_rt::reuse_heap`); this path keeps resolving.
+pub use psx_rt::reuse_heap;
 pub mod room_lighting;
 pub mod save;
 pub mod schedule;

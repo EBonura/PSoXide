@@ -76,6 +76,7 @@ pub mod tty;
 mod wait;
 
 pub mod heap;
+pub mod reuse_heap;
 
 pub use peripherals::Peripherals;
 
