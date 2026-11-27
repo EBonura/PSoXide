@@ -74,6 +74,9 @@ critical-section = ["dep:critical-section"]
 # stack, GPU/DMA/CD state and any panic message on screen. See `diag`. Never in a shipping
 # build. Also switches on psx-io's counters.
 console-diag = ["psx-io/console-diag"]
+# Diag builds: `heap::check_floor` stops the program, through the caller's report, when the heap
+# has less left than a floor (call it after a scene load). Off, the call compiles to nothing.
+ram-floor = []
 
 [lints]
 workspace = true

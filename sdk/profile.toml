@@ -21,7 +21,7 @@ psx-io   = ["core-cd"]
 # Development taps. A build with one of these on is a diagnostic build: it runs, it cannot
 # become a disc without --diag (the receipt psoxide-pgo apply writes says so).
 [diag]
-psx-rt   = ["host-tty", "boot-trace", "entry-census", "scratchpad-stack-check", "strict-faults", "console-diag"]
+psx-rt   = ["host-tty", "boot-trace", "entry-census", "scratchpad-stack-check", "strict-faults", "console-diag", "ram-floor"]
 psx-io   = ["console-diag"]
 psx-pack = ["residency-lock"]
 psx-telemetry = ["emit", "debug-log", "receipts"]

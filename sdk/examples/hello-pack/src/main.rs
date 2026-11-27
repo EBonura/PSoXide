@@ -267,6 +267,19 @@ fn run(rd: &mut SectorReader) -> Report {
     rep
 }
 
+/// Heap this test wants left after its loads (it allocates nothing; the check is the demo).
+const HEAP_FLOOR: usize = 1024;
+
+/// The floor check's report: say so on the terminal and stop.
+fn heap_short(left: usize) -> ! {
+    tty::print("hello-pack: FAIL HEAP FLOOR ");
+    tty::print_hex_u32(left as u32);
+    tty::println("");
+    loop {
+        psx_rt::interrupts::wait_vblank();
+    }
+}
+
 #[no_mangle]
 fn main() {
     let Some(peripherals) = psx_rt::Peripherals::take() else {
@@ -285,6 +298,8 @@ fn main() {
     // SAFETY: main runs once; the static is only touched here.
     let rd = unsafe { (*addr_of_mut!(READER)).insert(SectorReader::with_cd(peripherals.cd)) };
     let rep = run(rd);
+    // A diag build (psx-rt `ram-floor`) stops here if loading left the heap short.
+    psx_rt::heap::check_floor(HEAP_FLOOR, heap_short);
     if rep.all_ok {
         tty::println("hello-pack: ALL PASS");
     } else {

@@ -183,6 +183,26 @@ pub fn remaining() -> usize {
     unsafe { state().remaining() }
 }
 
+/// Diag builds: when the program's heap has fewer than `floor` bytes left, call `report` with
+/// what is left; it does not return (a fatal screen). Call it right after a scene or level load,
+/// with the game's floor, so running short of RAM fails at the load in a headless gate instead
+/// of later in play.
+///
+/// Only with the `ram-floor` feature (a `[diag]` tap); without it the call compiles to nothing
+/// and the program is byte-identical.
+#[inline(always)]
+pub fn check_floor(floor: usize, report: fn(usize) -> !) {
+    #[cfg(feature = "ram-floor")]
+    {
+        let left = remaining();
+        if left < floor {
+            report(left);
+        }
+    }
+    #[cfg(not(feature = "ram-floor"))]
+    let _ = (floor, report);
+}
+
 /// Seed the allocator from `start`, spanning `size` bytes.
 ///
 /// # Safety
@@ -324,6 +344,18 @@ mod tests {
         assert_eq!(remaining(), 156);
         let b = alloc_raw(4, 4);
         assert_eq!(b as usize, start + 100);
+
+        // The floor check: 152 bytes left passes a floor of 152 and stops below 153.
+        fn short(left: usize) -> ! {
+            panic!("heap short: {left}");
+        }
+        check_floor(152, short);
+        #[cfg(feature = "ram-floor")]
+        {
+            extern crate std;
+            let stopped = std::panic::catch_unwind(|| check_floor(153, short));
+            assert!(stopped.is_err());
+        }
     }
 
     #[cfg(feature = "alloc")]
