@@ -216,10 +216,12 @@ pub struct Streaming {
 }
 impl Streaming {
     /// Package words arrived so far, the five header words included.
+    #[must_use]
     pub const fn seen(&self) -> usize {
         self.seen
     }
     /// The package's complete word count.
+    #[must_use]
     pub const fn words(&self) -> usize {
         self.words
     }
@@ -346,6 +348,10 @@ impl<const SLOTS: usize> Registry<SLOTS> {
     /// [`Registry::stream_landed`]), and [`Registry::stream_feed`] takes words that arrived
     /// elsewhere (image words are stored in place, fixup words relocate the image in place).
     /// After an error, or to give up, [`Registry::abandon_stream`] frees the placement.
+    ///
+    /// # Errors
+    /// An arena that is not this registry's, a header that is short or not a package's, or no
+    /// room for the image.
     pub fn begin_stream(
         &mut self,
         arena: &CallerArena<'_>,
@@ -393,6 +399,9 @@ impl<const SLOTS: usize> Registry<SLOTS> {
     /// The image words of `stream` that have not arrived yet, in their final place: a reader may
     /// write the next words of the package here itself, then report them with
     /// [`Registry::stream_landed`]. Empty once the image is complete.
+    ///
+    /// # Errors
+    /// An arena or stream that is not this registry's.
     pub fn stream_image<'b>(
         &self,
         arena: &'b mut CallerArena<'_>,
@@ -404,6 +413,9 @@ impl<const SLOTS: usize> Registry<SLOTS> {
     }
     /// The reader wrote the next `count` image words of `stream` into
     /// [`Registry::stream_image`] itself.
+    ///
+    /// # Errors
+    /// An arena or stream that is not this registry's, or more words than the image has left.
     pub fn stream_landed(
         &self,
         arena: &CallerArena<'_>,
@@ -412,10 +424,7 @@ impl<const SLOTS: usize> Registry<SLOTS> {
     ) -> Result<(), Error> {
         self.check_stream(arena, stream)?;
         let done = stream.seen - 5;
-        if done
-            .checked_add(count)
-            .map_or(true, |end| end > stream.image)
-        {
+        if done.checked_add(count).is_none_or(|end| end > stream.image) {
             return Err(Error::Format(overlay::Error::Bounds));
         }
         let at = stream.start + done;
@@ -428,6 +437,10 @@ impl<const SLOTS: usize> Registry<SLOTS> {
     /// The next `words` of `stream`'s package, read somewhere else: image words are stored in
     /// place, fixup words relocate the image in place (every image word precedes them, so the
     /// checksum covers each word as it was read).
+    ///
+    /// # Errors
+    /// An arena or stream that is not this registry's, more words than the package has left,
+    /// or a fixup word that does not relocate.
     pub fn stream_feed(
         &self,
         arena: &mut CallerArena<'_>,
@@ -438,7 +451,7 @@ impl<const SLOTS: usize> Registry<SLOTS> {
         if stream
             .seen
             .checked_add(words.len())
-            .map_or(true, |end| end > stream.words)
+            .is_none_or(|end| end > stream.words)
         {
             return Err(Error::Format(overlay::Error::Bounds));
         }
@@ -475,6 +488,10 @@ impl<const SLOTS: usize> Registry<SLOTS> {
     /// Publish `stream` once every word of its package has arrived and the package checksum is
     /// the descriptor's: the I-cache is synchronized before the handle becomes admissible. On
     /// any failure the placement is freed and nothing is published.
+    ///
+    /// # Errors
+    /// An arena or stream that is not this registry's, a package not complete, or a checksum
+    /// that is not the descriptor's.
     pub fn finish_stream(
         &mut self,
         arena: &CallerArena<'_>,
