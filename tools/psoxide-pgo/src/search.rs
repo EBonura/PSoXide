@@ -46,6 +46,8 @@ use std::fmt::Write as _;
 use crate::layout::{self, Image, Section};
 use crate::Result;
 
+mod conflict;
+
 /// I-cache sets and size.
 const SETS: usize = 256;
 const CACHE: u32 = 4096;
@@ -754,33 +756,46 @@ impl Plan {
         let mut at = link.start;
         let mut gap = 0;
         for (&f, &target) in self.hot.iter().zip(&self.target) {
-            let align = link.align[f];
-            let lands = |at: u32| at.next_multiple_of(align);
-            let want = target.wrapping_sub(lands(at)) % CACHE;
-            let mut filled = 0;
-            if want > 0 {
-                for (slot, &k) in pool.0.iter().enumerate() {
-                    if used[slot] {
-                        continue;
-                    }
-                    let k_at = (at + filled).next_multiple_of(link.align[k]);
-                    let end = k_at + link.sections[k].size;
-                    if end - at <= want {
-                        used[slot] = true;
-                        listed.push(k);
-                        filled = end - at;
-                        if want - filled < 4 {
-                            break;
-                        }
-                    }
-                }
+            let want = target.wrapping_sub(at.next_multiple_of(link.align[f])) % CACHE;
+            let (slots, filled) = pool.fill(link, &used, at, want);
+            for slot in slots {
+                used[slot] = true;
+                listed.push(pool.0[slot]);
             }
             gap += filled;
-            at = lands(at + filled);
+            at = (at + filled).next_multiple_of(link.align[f]);
             listed.push(f);
             at += link.sections[f].size;
         }
         (listed, gap)
+    }
+}
+
+impl Pool {
+    /// The pool entries (by slot, in listing order) that fill up to `want`
+    /// bytes from `at`, largest first, none of them `used`; and the bytes
+    /// they fill.
+    fn fill(&self, link: &Link, used: &[bool], at: u32, want: u32) -> (Vec<usize>, u32) {
+        let mut slots = Vec::new();
+        let mut filled = 0;
+        if want == 0 {
+            return (slots, 0);
+        }
+        for (slot, &k) in self.0.iter().enumerate() {
+            if used[slot] {
+                continue;
+            }
+            let k_at = (at + filled).next_multiple_of(link.align[k]);
+            let end = k_at + link.sections[k].size;
+            if end - at <= want {
+                slots.push(slot);
+                filled = end - at;
+                if want - filled < 4 {
+                    break;
+                }
+            }
+        }
+        (slots, filled)
     }
 }
 
@@ -1177,7 +1192,9 @@ pub fn recorded(link: &Link, listed: &[usize]) -> layout::Recorded {
 pub const USAGE: &str = "\
        psoxide-pgo search <in.layout> <link.map> <image.exe> <linker-script> <out.layout>
                           (--trace NAME MAP EXE TRACE)... [--weight NAME=W]... [--seed N]
-                          [--rounds N] [--batch N] [--threads N] [--start greedy|link]
+                          [--rounds N] [--batch N] [--threads N] [--start greedy|link|recorded]
+                          [--method random|conflict] [--share F] [--passes N] [--top N]
+                          [--offsets N]
        psoxide-pgo icache <link.map> <image.exe> <linker-script> (--trace NAME MAP EXE TRACE)...
                           [--order FILE]... [--at MAP EXE]... [--layout FILE]... [--functions]";
 
@@ -1199,6 +1216,11 @@ struct Args {
     settings: Settings,
     start: String,
     functions: bool,
+    /// `random` (rounds of drawn moves) or `conflict` ([`conflict`]).
+    method: String,
+    /// `conflict`: the share of the traced weight it places.
+    share: f64,
+    refine: conflict::Refine,
 }
 
 fn parse(args: &[String]) -> Result<Args> {
@@ -1218,6 +1240,15 @@ fn parse(args: &[String]) -> Result<Args> {
         },
         start: "greedy".to_string(),
         functions: false,
+        method: "random".to_string(),
+        share: 0.999,
+        refine: conflict::Refine {
+            passes: 4,
+            top: 64,
+            offsets: 6,
+            threads: 1,
+            progress: true,
+        },
     };
     let mut at = 0;
     let take = |at: &mut usize, count: usize, flag: &str| -> Result<Vec<String>> {
@@ -1267,6 +1298,18 @@ fn parse(args: &[String]) -> Result<Args> {
             }
             "--start" => parsed.start = take(&mut at, 1, flag)?.remove(0),
             "--functions" => parsed.functions = true,
+            "--method" => parsed.method = take(&mut at, 1, flag)?.remove(0),
+            "--share" => {
+                let value = take(&mut at, 1, flag)?.remove(0);
+                parsed.share = value
+                    .parse()
+                    .ok()
+                    .filter(|share: &f64| (0.0..=1.0).contains(share))
+                    .ok_or_else(|| format!("--share wants a fraction, not {value:?}"))?;
+            }
+            "--passes" => parsed.refine.passes = number(&take(&mut at, 1, flag)?[0], flag)?,
+            "--top" => parsed.refine.top = number(&take(&mut at, 1, flag)?[0], flag)?,
+            "--offsets" => parsed.refine.offsets = number(&take(&mut at, 1, flag)?[0], flag)?,
             _ if flag.starts_with("--") => return Err(format!("unknown option {flag}").into()),
             _ => parsed.positional.push(args[at].clone()),
         }
@@ -1462,6 +1505,12 @@ fn run_search(args: &Args) -> Result<()> {
         start.listing(&link, &pool).1
     );
     let began = std::time::Instant::now();
+    if args.method == "conflict" {
+        return run_conflict(args, &text, &link, &traces, &address, output, began);
+    }
+    if args.method != "random" {
+        return Err(format!("--method wants random or conflict, not {}", args.method).into());
+    }
     let found = search(&link, &traces, &pool, start, &args.settings);
     let settings = &args.settings;
     let summary = format!(
@@ -1507,6 +1556,130 @@ fn run_search(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// `search --method conflict`: build the placement from the traces'
+/// conflicts and refine it ([`conflict`]). Its objective is normalised by
+/// the stalls of `--start`'s placement laid out as `search` lays out a plan,
+/// so it reads like a search's from the same start.
+fn run_conflict(
+    args: &Args,
+    text: &str,
+    link: &Link,
+    traces: &Traces,
+    start_address: &[u32],
+    output: &str,
+    began: std::time::Instant,
+) -> Result<()> {
+    let start = plan_of(link, traces, start_address);
+    let start_listed = start.listing(link, &Pool::new(link, traces)).0;
+    let start_address = link.realize(&start_listed);
+    let baseline: Vec<u64> = (0..traces.windows.len())
+        .map(|w| traces.simulate(w, &start_address).stalls)
+        .collect();
+    let scale: Vec<f64> = traces
+        .windows
+        .iter()
+        .zip(&baseline)
+        .map(|(window, &base)| window.weight / base.max(1) as f64)
+        .collect();
+    let floating: Vec<usize> = traces
+        .executed
+        .keys()
+        .map(|&k| k as usize)
+        .filter(|&k| !link.movable(k) && !link.fixed[k] && link.sections[k].start >= link.start)
+        .collect();
+    if !floating.is_empty() {
+        println!(
+            "{} traced sections the ordering cannot name follow the listed ones ({} \
+             instructions): every move shifts them",
+            floating.len(),
+            floating
+                .iter()
+                .map(|k| traces.executed[&(*k as u32)])
+                .sum::<u64>()
+        );
+    }
+    let lines = conflict::Lines::new(traces);
+    let built = conflict::construct(
+        link,
+        traces,
+        &lines,
+        &scale,
+        args.share,
+        args.settings.threads,
+        true,
+    );
+    let (listed, gap) = built.plan.listing(link, &built.pool);
+    let address = link.realize(&listed);
+    let missed = built
+        .plan
+        .hot
+        .iter()
+        .zip(&built.plan.target)
+        .filter(|&(&f, &target)| address[f] % CACHE != target)
+        .count();
+    println!(
+        "constructed: {}; {} functions placed ({:.2}% of the weight), {} off their offset, {} B \
+         of gap, {:.0} s",
+        stalls_line(traces, &address),
+        built.plan.hot.len(),
+        100.0 * built.placed_weight / built.total_weight.max(f64::MIN_POSITIVE),
+        missed,
+        gap,
+        began.elapsed().as_secs_f64()
+    );
+    let refine = conflict::Refine {
+        threads: args.settings.threads,
+        ..args.refine
+    };
+    let refined = conflict::refine(
+        link,
+        traces,
+        &lines,
+        &built.pool,
+        built.plan,
+        &baseline,
+        &refine,
+    );
+    let summary = format!(
+        "method conflict share {} passes {} top {} offsets {}: {} window replays, {} moves kept, \
+         objective {:.4} -> {:.4}",
+        args.share,
+        refine.passes,
+        refine.top,
+        refine.offsets,
+        refined.evaluations,
+        refined.accepted,
+        objective(traces, &baseline, &baseline),
+        refined.cost,
+    );
+    println!(
+        "search: {summary} in {:.0} s",
+        began.elapsed().as_secs_f64()
+    );
+    for (w, window) in traces.windows.iter().enumerate() {
+        println!(
+            "  {}: {} -> {} stall cycles",
+            window.name, baseline[w], refined.stalls[w]
+        );
+    }
+    let placement = recorded(link, &refined.listed);
+    let names: Vec<String> = traces
+        .windows
+        .iter()
+        .map(|window| format!("{} (weight {})", window.name, window.weight))
+        .collect();
+    // The stamp's rounds are the refinement's passes; a conflict placement
+    // draws nothing, so its seed is 0.
+    let stamp = layout::SearchStamp {
+        rounds: refine.passes,
+        seed: 0,
+    };
+    let out = searched_text(text, stamp, &summary, &names.join(", "), &placement);
+    std::fs::write(output, out)?;
+    println!("wrote {output}");
+    Ok(())
+}
+
 const START_TAG_TEXT: &str = "s";
 
 /// The layout `search` writes: the input profile's own lines as they were (an earlier search's
@@ -1547,7 +1720,7 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn encode(events: &[Event]) -> Vec<u8> {
+    pub(super) fn encode(events: &[Event]) -> Vec<u8> {
         let mut out = TRACE_MAGIC.to_vec();
         let mut end: i64 = 0;
         let varint = |out: &mut Vec<u8>, mut value: u64| loop {
@@ -1600,7 +1773,7 @@ mod tests {
     }
 
     /// A link of `sizes` byte functions from 0x80010000, named f0, f1, ...
-    fn link(sizes: &[u32]) -> Link {
+    pub(super) fn link(sizes: &[u32]) -> Link {
         let mut map = String::from("     VMA      LMA     Size Align Out     In      Symbol\n");
         let total: u32 = sizes.iter().sum();
         let _ = writeln!(map, "80010000 80010000 {total:8x}     4 .text");
@@ -1628,7 +1801,7 @@ mod tests {
         Link::new(&map, Image::parse(&body).unwrap(), &[])
     }
 
-    fn traces_for(link: &Link, events: &[Event]) -> Traces {
+    pub(super) fn traces_for(link: &Link, events: &[Event]) -> Traces {
         let mut traces = Traces::default();
         traces.read("t", 1.0, &encode(events), link, link).unwrap();
         traces

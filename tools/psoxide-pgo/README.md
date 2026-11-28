@@ -164,6 +164,7 @@ psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
 psoxide-pgo search  IN.layout LINK.map IMAGE.exe LINKER-SCRIPT OUT.layout
                     (--trace NAME MAP EXE TRACE)... [--weight NAME=W]... [--seed N]
                     [--rounds N] [--batch N] [--threads N] [--start greedy|link|recorded]
+                    [--method random|conflict] [--share F] [--passes N] [--top N] [--offsets N]
 psoxide-pgo icache  LINK.map IMAGE.exe LINKER-SCRIPT (--trace NAME MAP EXE TRACE)...
                     [--order FILE]... [--at MAP EXE]... [--layout FILE]... [--functions]
 GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
@@ -370,6 +371,61 @@ half (an anchoring replay and the traced one); the search 600 rounds of 24 in
 17 minutes on 10 threads, `-27%` predicted stalls on c4a3; the confirming
 build and four benchmarks about 6 minutes. About half an hour end to end. The
 traces are working files: delete them once the layout is committed.
+
+#### `--method conflict`
+
+The rounds above draw moves at random and keep what the replay likes. With
+`--method conflict` the search builds the placement instead
+(`src/search/conflict.rs`), from the same traces and scored by the same
+replay. A direct-mapped set misses on a fetch exactly when another line of
+that set ran since the line last did, so against code whose addresses are
+known, one pass over a window counts the stall cycles a function would add at
+each of the 256 line offsets: its own fetches that some placed line of their
+set got in front of, and the placed fetches that hit without it and would not
+with it, each at the refill cost the fetch would pay. A test checks the pass
+against a full replay at every offset.
+
+1. **Construct.** Rank the traced functions by the refill cost of every line
+   they fetch (a function cannot miss, or make another miss, more often than
+   it fetches lines). The ones that carry `--share` of it (default 0.999) are
+   placed, heaviest first, each at its cheapest line offset against the code
+   at fixed addresses and the ones placed before it; ties go to the offset
+   right after the previous one, so functions with nothing between them pack.
+   The rest of the traced code leads the ordered code, packed, so its
+   addresses are known from the start and no later move shifts it. The placed
+   functions are then linked in the order that reaches each one's offset with
+   the least cold fill: each step takes the function that lands on its offset
+   (or off it by under 1% of its own fetch cost) with the shortest gap.
+2. **Refine.** `--passes` times (default 4, stopping early when a pass keeps
+   nothing), take the `--top` functions (default 64) by the stalls a replay
+   charges them now and run the same pass for each against everything else as
+   it lies, once per word phase: that predicts what each of the 1024 word
+   offsets would cost. Replay the `--offsets` (default 6) it says gain most,
+   none when it says nothing gains, and keep the best when the replay lowers
+   the objective. A move refills only the gaps beside the function it moves,
+   so the rest of the layout stays put.
+
+Nothing is drawn at random: the same traces and layout give the same file on
+any thread count. It writes the same `s` and `o` lines, so `place` and
+`apply` take it unchanged; the stamp's rounds are the passes and its seed 0.
+It cannot split a function's hot and cold parts, which the ordering file
+cannot do either: it places whole input sections.
+
+Half-Life (the two windows of the search above, from the same greedy layout
+and first link; predicted stall cycles):
+
+| placement | c4a3 | c0a0 | objective | time |
+|-----------|-----:|-----:|----------:|-----:|
+| greedy, as `search` lays it out | 211,832,074 | 290,417,615 | 2.0000 | |
+| random, 600 rounds, seed 1 | 158,616,481 | 255,415,541 | 1.6283 | 1718 s on 4 threads |
+| random, 600 rounds, seed 7 | 163,870,992 | 257,646,829 | 1.6607 | 1759 s on 4 threads |
+| conflict, construction alone | 158,550,430 | 256,379,347 | 1.6313 | 109 s on 3 threads |
+| conflict, 4 passes | 150,571,190 | 245,637,515 | 1.5566 | 1078 s on 3 threads |
+
+The random searches ran at the same time on one machine and replayed 28,802
+windows each; the conflict search replayed 1,700. Its passes spend about as
+long predicting as replaying: a move of a function over about 1.5 KB marks
+more than three quarters of the sets, which is a full replay.
 
 What to commit: the layout file. `search` writes the profile's own lines
 unchanged, two comment lines saying how the placement was found, and the
