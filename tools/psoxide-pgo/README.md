@@ -427,6 +427,18 @@ windows each; the conflict search replayed 1,700. Its passes spend about as
 long predicting as replaying: a move of a function over about 1.5 KB marks
 more than three quarters of the sets, which is a full replay.
 
+WipEout (six track windows, firestar-v-chase weighted 2, from its greedy
+layout; both searches on 3 threads; the objective's start is 7):
+
+| placement | objective | window replays | time |
+|-----------|----------:|---------------:|-----:|
+| random, 600 rounds, seed 1 | 5.9674 | 86,406 | 8754 s |
+| conflict, construction alone | 6.0577 | 0 | 85 s |
+| conflict, 4 passes | 5.9380 | 3,534 | 1791 s |
+
+Each of the six windows stalled less under the conflict placement than
+under the random one.
+
 What to commit: the layout file. `search` writes the profile's own lines
 unchanged, two comment lines saying how the placement was found, and the
 placement: an `s` line (where the ordered sections start) and one `o` line per
