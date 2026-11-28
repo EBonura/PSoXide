@@ -1720,7 +1720,7 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
 mod tests {
     use super::*;
 
-    pub(super) fn encode(events: &[Event]) -> Vec<u8> {
+    fn encode(events: &[Event]) -> Vec<u8> {
         let mut out = TRACE_MAGIC.to_vec();
         let mut end: i64 = 0;
         let varint = |out: &mut Vec<u8>, mut value: u64| loop {

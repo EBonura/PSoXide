@@ -38,7 +38,8 @@
 use std::collections::HashMap;
 
 use super::{
-    objective, refill, Delta, Link, Plan, Pool, Traces, CACHE, CHUNK_SHIFT, FIXED, LEAVES, SETS,
+    objective, refill, Delta, Link, Plan, Pool, Scored, Traces, CACHE, CHUNK_SHIFT, FIXED, LEAVES,
+    SETS,
 };
 
 /// Lines in a chunk; a chunk whose base is mid-line runs into one more.
@@ -451,6 +452,9 @@ pub fn construct(
     }
 }
 
+/// How [`sequence`] ranks the next function: off its offset, gap, index.
+type Pick = (bool, u32, usize);
+
 /// The share of a function's own fetch cost a landing off its offset may
 /// add and still count as on it.
 const SLACK: f64 = 0.01;
@@ -478,7 +482,9 @@ fn sequence(
         .last()
         .map_or(link.start, |&(k, at)| at + link.sections[k].size);
     while !left.is_empty() {
-        let mut best: Option<((bool, u32, usize), Vec<usize>, u32)> = None;
+        // (off its offset, gap, index), the pool slots filling the gap, and
+        // where the function lands.
+        let mut best: Option<(Pick, Vec<usize>, u32)> = None;
         for (i, &f) in left.iter().enumerate() {
             let want = offset[&f].wrapping_sub(at.next_multiple_of(link.align[f])) % CACHE;
             if best
@@ -641,7 +647,7 @@ fn score(
     candidates: &[Laid],
     baseline: &[u64],
     threads: usize,
-) -> Vec<(f64, Vec<u64>, Vec<usize>, Vec<u32>)> {
+) -> Vec<Scored> {
     let threads = threads.clamp(1, candidates.len().max(1));
     let per = candidates.len().div_ceil(threads);
     let mut results = vec![None; candidates.len()];
